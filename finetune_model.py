@@ -1,13 +1,23 @@
-
 import os
 import argparse
 
 import torch
 from trl import SFTTrainer
 from datasets import load_dataset
-from transformers import TrainingArguments
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    DataCollatorForLanguageModeling,
+    TrainingArguments,
+)
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
+
+try:
+    from transformers import BitsAndBytesConfig
+    USE_4BIT = torch.cuda.is_available()
+except ImportError:
+    USE_4BIT = False
 
 
 def print_trainable_parameters(model):
@@ -24,36 +34,39 @@ def print_trainable_parameters(model):
 
 
 def format_instruction(sample):
-    return f"""You are a personal stylist recommending fashion advice and clothing combinations. Use the self body and style description below, combined with the event described in the context to generate 5 self-contained and complete outfit combinations.
-        ### Input:
-        {sample["input"]}
+    return f"""<s>[INST] Write a news article about the following topic: [/INST]
+{sample["text"]}</s>"""
 
-        ### Context:
-        {sample["context"]}
-
-        ### Response:
-        {sample["completion"]}
-    """
+def load_base_model(base_id: str, kbit: bool = True):
+    if kbit and torch.cuda.is_available():
+        bnb_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            base_id,
+            quantization_config=bnb_cfg,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_id,
+            device_map="auto" if torch.cuda.is_available() else {"": "cpu"},
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+    return model
 
 def finetune_model(args):
-    dataset = load_dataset(args.dataset, token=args.auth_token)
+    # Load dataset
+    ds = load_dataset("json", data_files=args.dataset)["train"]
+
     # base model to finetune
     model_id = args.base_model
-
-    # BitsAndBytesConfig to quantize the model int-4 config
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
-
-    # load model and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=bnb_config, use_cache=False, device_map="auto")
-    model.config.pretraining_tp = 1
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    tokenizer.pad_token = tokenizer.eos_token
 
     # LoRA config based on QLoRA paper
     peft_config = LoraConfig(
@@ -74,42 +87,50 @@ def finetune_model(args):
         task_type="CAUSAL_LM",
     )
 
+    # load model and tokenizer
+    model = load_base_model(model_id, kbit=args.use_qlora)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        use_fast=True,
+        trust_remote_code=True,
+        token=args.auth_token
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+
     # prepare model for training
-    model = prepare_model_for_kbit_training(model)
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     model = get_peft_model(model, peft_config)
     
     # print the number of trainable model params
     print_trainable_parameters(model)
 
-    model_args = TrainingArguments(
-        output_dir="mistral-7-style",
-        num_train_epochs=3,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,
-        gradient_checkpointing=True,
-        optim="paged_adamw_32bit",
-        logging_steps=10,
-        save_strategy="epoch",
-        learning_rate=2e-4,
-        bf16=True,
-        tf32=True,
-        max_grad_norm=0.3,
-        warmup_ratio=0.03,
-        lr_scheduler_type="constant",
-        disable_tqdm=False
+    # Data collator for language modeling
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,  # for causal-LM fine-tuning
     )
 
-    max_seq_length = 2048
+    training_args = TrainingArguments(
+        output_dir=args.model_name,
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-4,
+        logging_steps=25,
+        save_total_limit=2,
+        fp16=torch.cuda.is_available(),
+        report_to="wandb",
+        push_to_hub=args.push_to_hub,
+        hub_model_id=args.model_name if args.push_to_hub else None
+    )
 
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset,
-        peft_config=peft_config,
-        max_seq_length=max_seq_length,
-        tokenizer=tokenizer,
-        packing=True,
+        args=training_args,
+        train_dataset=ds,
+        data_collator=data_collator,
         formatting_func=format_instruction,
-        args=model_args,
     )
 
     # train
@@ -144,6 +165,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--push_to_hub", default=False, action="store_true", 
         help="Whether to push finetuned model to HF hub."
+    )
+    parser.add_argument(
+        "--use_qlora", default=False, action="store_true", 
+        help="Whether to use QLoRA for model quantization."
     )
     args = parser.parse_args()
     finetune_model(args)
