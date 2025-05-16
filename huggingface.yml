@@ -1,5 +1,5 @@
 compute:
-  gpu: A100
+  gpu: A100                     # 40 GB
 
 environment:
   image: ghcr.io/huggingface/pytorch-cuda:2.3.0-cuda11.8-ubuntu20.04
@@ -7,7 +7,7 @@ environment:
     WANDB_API_KEY: $WANDB_API_KEY
 
 run:
-  - python finetune_model.py \
+  - python model_training/train_lora.py \
         --dataset nobanofi/newsroom-json \
         --base_model mistralai/Mistral-7B-Instruct-v0.2 \
         --model_name mistral-newsroom-lora \
