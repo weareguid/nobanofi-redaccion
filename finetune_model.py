@@ -62,8 +62,13 @@ def load_base_model(base_id: str, kbit: bool = True):
     return model
 
 def finetune_model(args):
-    # Load dataset
-    ds = load_dataset("json", data_files=args.dataset)["train"]
+    # Load dataset from Hugging Face Hub
+    if "/" in args.dataset:
+        # If dataset path contains a slash, treat it as a Hugging Face dataset
+        ds = load_dataset(args.dataset, split="train")
+    else:
+        # Otherwise, treat it as a local file
+        ds = load_dataset("json", data_files=args.dataset)["train"]
 
     # base model to finetune
     model_id = args.base_model

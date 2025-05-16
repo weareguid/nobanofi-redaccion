@@ -1,0 +1,9 @@
+compute:
+  instance_type: A100
+  instance_count: 1
+
+base_model: mistralai/Mistral-7B-v0.1
+model_name: mistral-newsroom-lora
+dataset: train.json
+use_qlora: true
+push_to_hub: true 
