@@ -1,10 +1,11 @@
 compute:
-  gpu: A100                     # 40 GB
+  gpu: T4                     # Using T4 instead of A100
 
 environment:
   image: ghcr.io/huggingface/pytorch-cuda:2.3.0-cuda11.8-ubuntu20.04
   env:
     WANDB_API_KEY: $WANDB_API_KEY
+    HF_TOKEN: $HF_TOKEN
 
 run:
   - python model_training/train_lora.py \
@@ -12,7 +13,8 @@ run:
         --base_model mistralai/Mistral-7B-Instruct-v0.2 \
         --model_name mistral-newsroom-lora \
         --push_to_hub \
-        --auth_token $HF_TOKEN
+        --auth_token $HF_TOKEN \
+        --use_qlora
 
 # Training configuration
 training:
